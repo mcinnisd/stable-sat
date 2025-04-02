@@ -7,26 +7,24 @@ Each controller is designed to be injected into the SatelliteEnv.
 """
 
 import numpy as np
+import logging
 from scipy.spatial.transform import Rotation as R
-import torqueFunctions  # assumes you have a module with your torque functions
+import torqueFunctions
 
-class PIDController:
+# Set up logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+
+
+class BaseController:
     """
-    PID Controller for Satellite Attitude Control.
-    Implements a PID control law with proportional, derivative, and integral terms.
+    Base Controller for common functionalities shared by control strategies.
+    Handles desired orientation points and target hold logic.
     """
-    def __init__(self, k_R=1.5, k_omega=10.0, k_I=0.0,
-                 hold_time_threshold=1.0, orientation_error_threshold=0.15,
-                 disturbance_time=2.0, desired_points=None, max_torque=2.0):
-        self.k_R = k_R
-        self.k_omega = k_omega
-        self.k_I = k_I
+    def __init__(self, hold_time_threshold=1.0, orientation_error_threshold=0.15,
+                 disturbance_time=2.0, desired_points=None):
         self.hold_time_threshold = hold_time_threshold
         self.orientation_error_threshold = orientation_error_threshold
         self.disturbance_time = disturbance_time
-        self.max_torque = max_torque
-        
-        # Define desired orientations as quaternions.
         if desired_points is None:
             desired_points = [
                 np.array([0, 0, 0, 1]),
@@ -37,88 +35,83 @@ class PIDController:
         self.desired_points = [p / np.linalg.norm(p) for p in desired_points]
         self.current_target_idx = 0
         self.target_hold_time = 0.0
+
+    def compute_error_and_update_target(self, env, q_desired):
+        """
+        Computes the orientation error vector and updates the target hold logic.
+        Returns:
+            e_R (np.array): Orientation error vector.
+        """
+        R_d = R.from_quat(q_desired).as_matrix()
+        R_current = R.from_quat(env.q).as_matrix()
+        R_err = R_d.T @ R_current - R_current.T @ R_d
+        e_R = 0.5 * np.array([R_err[2, 1], R_err[0, 2], R_err[1, 0]])
+        
+        if np.linalg.norm(e_R) < self.orientation_error_threshold:
+            self.target_hold_time += env.dt
+            if self.target_hold_time >= self.hold_time_threshold:
+                logging.info(f"Time {env.current_time:.2f}: success: Reached control point {self.current_target_idx}")
+                if self.current_target_idx < len(self.desired_points) - 1:
+                    self.current_target_idx += 1
+                    logging.info(f"Time {env.current_time:.2f}: now heading to control point {self.current_target_idx}")
+                self.target_hold_time = 0.0
+        else:
+            self.target_hold_time = 0.0
+        
+        return e_R
+
+
+class PIDController(BaseController):
+    """
+    PID Controller for Satellite Attitude Control.
+    Implements a PID control law with proportional, derivative, and integral terms.
+    """
+    def __init__(self, k_P=1.5, k_D=7.0, k_I=0.1, max_torque=2.0, **kwargs):
+        super().__init__(**kwargs)
+        self.k_P = k_P
+        self.k_D = k_D
+        self.k_I = k_I
+        self.max_torque = max_torque
         self.error_integral = np.zeros(3)
     
     def __call__(self, env):
         # During disturbance phase, use the external disturbance torque.
         if env.current_time < self.disturbance_time:
             return torqueFunctions.external_torque_step(env.current_time)
-        # Compute control torque using PID law.
-        q_desired = self.desired_points[self.current_target_idx]
-        R_d = R.from_quat(q_desired).as_matrix()
-        R_current = R.from_quat(env.q).as_matrix()
-        R_err = R_d.T @ R_current - R_current.T @ R_d
-        e_R = 0.5 * np.array([R_err[2, 1], R_err[0, 2], R_err[1, 0]])
         
-        # Update hold time logic for switching target points.
-        if np.linalg.norm(e_R) < self.orientation_error_threshold:
-            self.target_hold_time += env.dt
-            if self.target_hold_time >= self.hold_time_threshold:
-                print(f"Time {env.current_time:.2f}: success: Reached control point {self.current_target_idx}")
-                if self.current_target_idx < len(self.desired_points) - 1:
-                    self.current_target_idx += 1
-                    print(f"Time {env.current_time:.2f}: now heading to control point {self.current_target_idx}")
-                self.target_hold_time = 0.0
-        else:
-            self.target_hold_time = 0.0
+        q_desired = self.desired_points[self.current_target_idx]
+        e_R = self.compute_error_and_update_target(env, q_desired)
         
         # Update the integral term.
         self.error_integral += e_R * env.dt
         self.error_integral = np.clip(self.error_integral, -5.0, 5.0)
         
         # Compute PID control torque.
-        u = -self.k_R * e_R - self.k_omega * env.omega - self.k_I * self.error_integral
+        u = -self.k_P * e_R - self.k_D * env.omega - self.k_I * self.error_integral
         u = np.clip(u, -self.max_torque, self.max_torque)
         # Return computed control torque (environment applies -u).
         return -u
 
-class LQRController:
+
+class LQRController(BaseController):
     """
     LQR Controller for Satellite Attitude Control.
     Computes control torque using decoupled LQR gains.
     """
-    def __init__(self, Q=np.diag([10, 1]), R_mat=np.array([[10]]),
-                 hold_time_threshold=1.0, orientation_error_threshold=0.15,
-                 disturbance_time=2.0, desired_points=None, max_torque=2.0):
+    def __init__(self, Q=np.diag([10, 1]), R_mat=np.array([[10]]), max_torque=2.0, **kwargs):
+        super().__init__(**kwargs)
         self.Q = Q
         self.R_mat = R_mat
-        self.hold_time_threshold = hold_time_threshold
-        self.orientation_error_threshold = orientation_error_threshold
-        self.disturbance_time = disturbance_time
-        
-        if desired_points is None:
-            desired_points = [
-                np.array([0, 0, 0, 1]),
-                R.from_euler('z', 90, degrees=True).as_quat(),
-                R.from_euler('y', 90, degrees=True).as_quat(),
-                R.from_euler('x', 90, degrees=True).as_quat()
-            ]
-        self.desired_points = [p / np.linalg.norm(p) for p in desired_points]
-        self.current_target_idx = 0
-        self.target_hold_time = 0.0
-        self.K = None  # LQR gains will be computed on first call.
         self.max_torque = max_torque
+        self.K = None  # LQR gains will be computed on first call.
     
     def __call__(self, env):
         # During disturbance phase, use external disturbance torque.
         if env.current_time < self.disturbance_time:
             return torqueFunctions.external_torque_step(env.current_time)
-        q_desired = self.desired_points[self.current_target_idx]
-        R_d = R.from_quat(q_desired).as_matrix()
-        R_current = R.from_quat(env.q).as_matrix()
-        R_err = R_d.T @ R_current - R_current.T @ R_d
-        e_R = 0.5 * np.array([R_err[2, 1], R_err[0, 2], R_err[1, 0]])
         
-        if np.linalg.norm(e_R) < self.orientation_error_threshold:
-            self.target_hold_time += env.dt
-            if self.target_hold_time >= self.hold_time_threshold:
-                print(f"Time {env.current_time:.2f}: success: Reached control point {self.current_target_idx}")
-                if self.current_target_idx < len(self.desired_points) - 1:
-                    self.current_target_idx += 1
-                    print(f"Time {env.current_time:.2f}: now heading to control point {self.current_target_idx}")
-                self.target_hold_time = 0.0
-        else:
-            self.target_hold_time = 0.0
+        q_desired = self.desired_points[self.current_target_idx]
+        e_R = self.compute_error_and_update_target(env, q_desired)
         
         # Compute LQR control torque for each axis.
         u = np.zeros(3)

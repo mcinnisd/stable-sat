@@ -10,7 +10,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 from scipy.spatial.transform import Rotation as R
 
-def draw_satellite(ax, q, inertia, current_time):
+def draw_satellite(ax, q, inertia, current_time, q_desired=None):
     """
     Draws the satellite on the provided 3D axis.
     
@@ -19,6 +19,7 @@ def draw_satellite(ax, q, inertia, current_time):
         q: Current quaternion (array-like) for the satellite orientation.
         inertia: Inertia values [Ix, Iy, Iz] used to scale the satellite's shape.
         current_time: Simulation time (displayed in the title).
+        q_desired: Desired quaternion for target orientation.
     """
     ax.cla()  # Clear dynamic content
     origin = np.array([0, 0, 0])
@@ -61,48 +62,88 @@ def draw_satellite(ax, q, inertia, current_time):
     ax.quiver(*origin, *body_x, color='m', length=0.8, normalize=True)
     ax.quiver(*origin, *body_y, color='c', length=0.8, normalize=True)
     ax.quiver(*origin, *body_z, color='y', length=0.8, normalize=True)
-    
+
+    # If target orientation is provided, draw its coordinate axes as dashed lines
+    if q_desired is not None:
+        R_target = R.from_quat(q_desired).as_matrix()
+        target_x = R_target @ np.array([1, 0, 0])
+        target_y = R_target @ np.array([0, 1, 0])
+        target_z = R_target @ np.array([0, 0, 1])
+        # Draw dashed lines for the target axes
+        ax.plot([0, target_x[0]*0.8], [0, target_x[1]*0.8], [0, target_x[2]*0.8], 'r--', label='Target X')
+        ax.plot([0, target_y[0]*0.8], [0, target_y[1]*0.8], [0, target_y[2]*0.8], 'g--', label='Target Y')
+        ax.plot([0, target_z[0]*0.8], [0, target_z[1]*0.8], [0, target_z[2]*0.8], 'b--', label='Target Z')
+
     ax.set_xlim([-1.5, 1.5])
     ax.set_ylim([-1.5, 1.5])
     ax.set_zlim([-1.5, 1.5])
     ax.set_title(f"Satellite Orientation at t = {current_time:.2f}s")
 
-def plot_static_simulation(times, euler_angles, omega_history):
+def plot_static_simulation(times, euler_angles, omega_history, desired_euler_points=None, q_scalar_history=None, desired_q_scalar_history=None):
     """
     Plots static graphs for the satellite simulation.
     
     Plots:
       - Euler angles (roll, pitch, yaw) over time.
       - Angular velocity components over time.
+      - Optionally, the quaternion scalar component (w) over time with the desired set point as a step function.
     """
-    roll = euler_angles[:, 0]
-    pitch = euler_angles[:, 1]
-    yaw = euler_angles[:, 2]
+    if q_scalar_history is not None:
+        fig, axs = plt.subplots(3, 1, figsize=(10, 12))
+    else:
+        fig, axs = plt.subplots(2, 1, figsize=(10, 8))
     
-    fig, axs = plt.subplots(2, 1, figsize=(10, 8))
-    axs[0].plot(times, roll, label="Roll")
-    axs[0].plot(times, pitch, label="Pitch")
-    axs[0].plot(times, yaw, label="Yaw")
+    # Plot Euler angles
+    axs[0].plot(times, euler_angles[:, 0], label="Roll")
+    axs[0].plot(times, euler_angles[:, 1], label="Pitch")
+    axs[0].plot(times, euler_angles[:, 2], label="Yaw")
     axs[0].set_xlabel("Time (s)")
     axs[0].set_ylabel("Angle (deg)")
     axs[0].set_title("Satellite Euler Angles Over Time")
     axs[0].legend()
     
+    if desired_euler_points is not None:
+        text_lines = ["Desired Set Points:"]
+        for idx, point in enumerate(desired_euler_points):
+            text_lines.append(f"P{idx}: {np.round(point, 2)}")
+        axs[0].text(0.05, 0.65, "\n".join(text_lines), transform=axs[0].transAxes, 
+                    bbox=dict(facecolor='white', alpha=0.7))
+    
+    # Plot Angular Velocity
+    if q_scalar_history is not None:
+        ax_av = axs[1]
+        ax_q = axs[2]
+    else:
+        ax_av = axs[1]
     omega_history = np.array(omega_history)
-    axs[1].plot(times, omega_history[:, 0], label="$\omega_x$")
-    axs[1].plot(times, omega_history[:, 1], label="$\omega_y$")
-    axs[1].plot(times, omega_history[:, 2], label="$\omega_z$")
-    axs[1].set_xlabel("Time (s)")
-    axs[1].set_ylabel("Angular Velocity (rad/s)")
-    axs[1].set_title("Satellite Angular Velocity Over Time")
-    axs[1].legend()
+    ax_av.plot(times, omega_history[:, 0], label="$\omega_x$")
+    ax_av.plot(times, omega_history[:, 1], label="$\omega_y$")
+    ax_av.plot(times, omega_history[:, 2], label="$\omega_z$")
+    ax_av.set_xlabel("Time (s)")
+    ax_av.set_ylabel("Angular Velocity (rad/s)")
+    ax_av.set_title("Satellite Angular Velocity Over Time")
+    ax_av.legend()
+    
+    # Plot Quaternion Scalar Component if data is provided
+    if q_scalar_history is not None:
+        ax_q.plot(times, q_scalar_history, label="Quaternion Scalar (w)")
+        if desired_q_scalar_history is not None:
+            ax_q.plot(times, desired_q_scalar_history, label="Desired Scalar", linestyle='--', drawstyle='steps-post')
+        ax_q.set_xlabel("Time (s)")
+        ax_q.set_ylabel("Quaternion Scalar (w)")
+        ax_q.set_title("Satellite Quaternion Scalar Component Over Time")
+        ax_q.legend()
     
     plt.tight_layout()
     plt.show()
     
-def annotate_wheel_speeds(ax, wheel_speeds):
-    """Annotates the reaction wheel speeds as text on the given axis."""
-    ax.text2D(0.05, 0.95, f"Wheel speeds: {np.round(wheel_speeds, 3)}", transform=ax.transAxes)
+def annotate_wheel_speeds(ax, wheel_speeds, error=None):
+    """Annotates the reaction wheel speeds and error value as text on the given axis."""
+    text = f"Wheel speeds: {np.round(wheel_speeds, 3)}"
+    if error is not None:
+        error_norm = np.linalg.norm(error)
+        text += f" | Error: {error_norm:.2f} rad"
+    ax.text2D(0.05, 0.95, text, transform=ax.transAxes)
 
 def plot_wheel_speeds(times, wheel_speeds):
     """

@@ -13,23 +13,31 @@ import scipy.linalg as la
 from scipy.spatial.transform import Rotation as R
 import matplotlib.pyplot as plt
 import visualization
+import logging
 
-def update_state(q, omega, dt, torque, I_sat):
+# Set up logging for dynamics module
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+
+
+def update_state(q: np.ndarray, omega: np.ndarray, dt: float, torque: np.ndarray, I_sat: np.ndarray, I_inv: np.ndarray = None) -> tuple[np.ndarray, np.ndarray]:
     """
     Updates the satellite state given the current state, time step, applied torque, and inertia matrix.
     
     Parameters:
-      q (np.array): Current quaternion [x, y, z, w].
-      omega (np.array): Current angular velocity (rad/s).
+      q (np.ndarray): Current quaternion [x, y, z, w].
+      omega (np.ndarray): Current angular velocity (rad/s).
       dt (float): Time step.
-      torque (np.array): Applied external torque.
-      I_sat (np.array): Satellite inertia matrix.
+      torque (np.ndarray): Applied external torque.
+      I_sat (np.ndarray): Satellite inertia matrix.
+      I_inv (np.ndarray, optional): Precomputed inverse of I_sat. If not provided, it will be computed.
     
     Returns:
-      q_new (np.array): Updated quaternion.
-      omega_new (np.array): Updated angular velocity.
+      q_new (np.ndarray): Updated (and normalized) quaternion.
+      omega_new (np.ndarray): Updated angular velocity.
     """
-    I_inv = np.linalg.inv(I_sat)
+    if I_inv is None:
+        I_inv = np.linalg.inv(I_sat)
+    
     # Calculate angular acceleration: ω̇ = I⁻¹ (τ - ω × (I * ω))
     omega_dot = I_inv @ (torque - np.cross(omega, I_sat @ omega))
     
@@ -40,9 +48,13 @@ def update_state(q, omega, dt, torque, I_sat):
     delta_rot = R.from_rotvec(omega_new * dt)
     q_new = (R.from_quat(q) * delta_rot).as_quat()
     
+    # Normalize the updated quaternion to ensure unit length
+    q_new = normalize_quaternion(q_new)
+    
     return q_new, omega_new
 
-def compute_lqr_gain(I_i, Q, R_mat):
+
+def compute_lqr_gain(I_i: float, Q: np.ndarray, R_mat: np.ndarray) -> np.ndarray:
     """Compute LQR gain for a double integrator model for a given axis."""
     A = np.array([[0, 1],
                   [0, 0]])
@@ -52,11 +64,15 @@ def compute_lqr_gain(I_i, Q, R_mat):
     K = np.linalg.inv(R_mat) @ (B.T @ P)
     return K
 
-def normalize_quaternion(q):
+
+def normalize_quaternion(q: np.ndarray) -> np.ndarray:
+    """Normalizes a quaternion and logs a warning if the norm is zero."""
     norm = np.linalg.norm(q)
     if norm == 0:
+        logging.warning("Attempted to normalize a zero-norm quaternion. Returning the original quaternion.")
         return q
     return q / norm
+
 
 class SatelliteEnv(gym.Env):
     """
@@ -71,6 +87,8 @@ class SatelliteEnv(gym.Env):
         self.inertia = inertia
         self.I_sat = np.diag(inertia)
         self.I_w = I_w
+        # Precompute the inverse inertia matrix since I_sat is constant
+        self.I_inv = np.linalg.inv(self.I_sat)
         # Inject control policy; if None, default to zero control.
         self.control_policy = control_policy if control_policy is not None else self.zero_control
         self.observation_space = spaces.Box(low=-np.inf, high=np.inf, shape=(6,), dtype=np.float32)
@@ -87,6 +105,11 @@ class SatelliteEnv(gym.Env):
         self.omega = np.zeros(3) if initial_omega is None else initial_omega
         self.current_time = 0.0
         self.omega_w = np.zeros(3)
+        if hasattr(self, 'control_policy') and self.control_policy is not None and hasattr(self.control_policy, 'desired_points'):
+            from scipy.spatial.transform import Rotation as R
+            self.desired_euler_points = [R.from_quat(q).as_euler('xyz', degrees=True) for q in self.control_policy.desired_points]
+        else:
+            self.desired_euler_points = None
         return self._get_obs()
     
     def _get_obs(self):
@@ -100,8 +123,16 @@ class SatelliteEnv(gym.Env):
     
     def render(self, mode='human'):
         self._init_plot()
-        visualization.draw_satellite(self.ax, self.q, self.inertia, self.current_time)
-        visualization.annotate_wheel_speeds(self.ax, self.omega_w)
+        q_desired = None
+        error = None
+        # If the control policy has a desired_points attribute, compute the target orientation and error
+        if hasattr(self, 'control_policy') and self.control_policy is not None and hasattr(self.control_policy, 'desired_points'):
+            q_desired = self.control_policy.desired_points[self.control_policy.current_target_idx]
+            from scipy.spatial.transform import Rotation as R
+            error_rot = R.from_quat(q_desired) * R.from_quat(self.q).inv()
+            error = error_rot.as_rotvec()
+        visualization.draw_satellite(self.ax, self.q, self.inertia, self.current_time, error=error, q_desired=q_desired)
+        visualization.annotate_wheel_speeds(self.ax, self.omega_w, error=error)
         plt.draw()
         plt.pause(0.1)
     
@@ -109,10 +140,11 @@ class SatelliteEnv(gym.Env):
         # Retrieve the control torque from the injected policy.
         u = self.control_policy(self)
         # The satellite experiences -u due to the reaction wheels.
-        self.q, self.omega = update_state(self.q, self.omega, self.dt, -u, self.I_sat)
+        self.q, self.omega = update_state(self.q, self.omega, self.dt, -u, self.I_sat, self.I_inv)
         # Update reaction wheel speeds.
         self.omega_w = self.omega_w + (u / self.I_w) * self.dt
         self.current_time += self.dt
         done = self.current_time >= self.sim_time
         return self._get_obs(), 0.0, done, {}
+
 
