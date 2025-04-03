@@ -103,31 +103,32 @@ def main():
 
     # Static plotting mode: collect simulation data and plot after simulation.
     if args.plot_static:
-        from visualization import plot_static_simulation, plot_wheel_speeds
+        from visualization import plot_static_simulation
         # Create a new environment instance for static simulation
-        env = SatelliteRLEnv(sim_time=args.sim_time, dt=args.dt, inertia=[1.0, 1.0, 1.0],
+        env = SatelliteRLEnv(sim_time=args.sim_time, dt=args.dt, inertia=[1.0, 10.0, 1.0],
                               I_w=args.I_w, max_torque=args.max_torque, controlled_axes=args.controlled_axes)
         times = []
         euler_angles = []
         omega_history = []
-        wheel_speeds = []
+        q_scalar_history = []
+        desired_q_scalar_history = []
         obs = env.reset()
         while env.current_time < env.sim_time:
             times.append(env.current_time)
             from scipy.spatial.transform import Rotation as R
             euler = R.from_quat(env.q).as_euler('xyz', degrees=True)
+            q_scalar_history.append(env.q[3])
+            desired_q_scalar_history.append(1.0)  # Desired quaternion is [0,0,0,1] with scalar part 1.0
             euler_angles.append(euler)
             omega_history.append(env.omega.copy())
-            wheel_speeds.append(env.omega_w.copy())
             action, _ = model.predict(obs, deterministic=True)
             obs, reward, done, info = env.step(action)
         # Plot the static simulation results
-        plot_static_simulation(np.array(times), np.array(euler_angles), np.array(omega_history))
-        plot_wheel_speeds(np.array(times), np.array(wheel_speeds))
+        plot_static_simulation(np.array(times), np.array(euler_angles), np.array(omega_history), q_scalar_history=np.array(q_scalar_history), desired_q_scalar_history=np.array(desired_q_scalar_history))
         env.close()
     else:
         # Interactive simulation mode
-        env = SatelliteRLEnv(sim_time=args.sim_time, dt=args.dt, inertia=[1.0, 1.0, 1.0],
+        env = SatelliteRLEnv(sim_time=args.sim_time, dt=args.dt, inertia=[1.0, 10.0, 1.0],
                               I_w=args.I_w, max_torque=args.max_torque, controlled_axes=args.controlled_axes)
         obs = env.reset()
         done = False

@@ -131,7 +131,7 @@ class SatelliteEnv(gym.Env):
             from scipy.spatial.transform import Rotation as R
             error_rot = R.from_quat(q_desired) * R.from_quat(self.q).inv()
             error = error_rot.as_rotvec()
-        visualization.draw_satellite(self.ax, self.q, self.inertia, self.current_time, error=error, q_desired=q_desired)
+        visualization.draw_satellite(self.ax, self.q, self.inertia, self.current_time, q_desired=q_desired)
         visualization.annotate_wheel_speeds(self.ax, self.omega_w, error=error)
         plt.draw()
         plt.pause(0.1)
