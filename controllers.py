@@ -50,10 +50,10 @@ class BaseController:
         if np.linalg.norm(e_R) < self.orientation_error_threshold:
             self.target_hold_time += env.dt
             if self.target_hold_time >= self.hold_time_threshold:
-                logging.info(f"Time {env.current_time:.2f}: success: Reached control point {self.current_target_idx}")
+                # logging.info(f"Time {env.current_time:.2f}: success: Reached control point {self.current_target_idx}")
                 if self.current_target_idx < len(self.desired_points) - 1:
                     self.current_target_idx += 1
-                    logging.info(f"Time {env.current_time:.2f}: now heading to control point {self.current_target_idx}")
+                    # logging.info(f"Time {env.current_time:.2f}: now heading to control point {self.current_target_idx}")
                 self.target_hold_time = 0.0
         else:
             self.target_hold_time = 0.0

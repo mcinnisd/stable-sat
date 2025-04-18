@@ -159,3 +159,56 @@ def plot_wheel_speeds(times, wheel_speeds):
     plt.title("Reaction Wheel Speeds Over Time")
     plt.legend()
     plt.show()
+
+def plot_torque_over_time(times, torque_history):
+    """
+    Plots the control torque magnitude over time.
+    
+    Parameters:
+        times (array-like): Time stamps for each step.
+        torque_history (array-like): Torque magnitude applied at each time step.
+    """
+    plt.figure()
+    plt.plot(times, torque_history, marker='o')
+    plt.xlabel("Time (s)")
+    plt.ylabel("Torque Magnitude")
+    plt.title("Control Torque Over Time")
+    plt.show()
+
+def plot_rl_model_performance(training_steps, convergence_times, total_torques):
+    """
+    Plots RL model performance versus training steps on a log-scale x-axis.
+    
+    Parameters:
+        training_steps (array-like): Number of timesteps each RL model was trained for.
+        convergence_times (array-like): Convergence times for each model.
+        total_torques (array-like): Total torque usage for each model.
+    """
+    fig, ax1 = plt.subplots()
+    ax1.plot(training_steps, convergence_times, marker='o')
+    ax1.set_xscale('log')
+    ax1.set_xlabel("RL Training Steps (log scale)")
+    ax1.set_ylabel("Convergence Time (s)")
+    ax1.set_title("RL Model Performance vs Training Steps")
+    
+    ax2 = ax1.twinx()
+    ax2.plot(training_steps, total_torques, marker='x')
+    ax2.set_ylabel("Total Torque")
+    
+    fig.tight_layout()
+    plt.show()
+
+def plot_performance_vs_initial_error(init_errors, convergence_times, total_torques, label):
+    fig, ax1 = plt.subplots()
+    ax1.scatter(init_errors, convergence_times, marker='o', label=f"{label} time")
+    ax1.set_xlabel("Initial Attitude Error (deg)")
+    ax1.set_ylabel("Convergence Time (s)")
+    ax1.set_title("Performance vs Initial Error")
+    
+    ax2 = ax1.twinx()
+    ax2.scatter(init_errors, total_torques, marker='x', label=f"{label} torque")
+    ax2.set_ylabel("Total Torque")
+    
+    fig.legend(loc="upper right")
+    plt.tight_layout()
+    plt.show()

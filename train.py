@@ -7,23 +7,23 @@ plots a reward curve, and saves the model, or loads a pretrained model to simula
 """
 
 import argparse
-import gym
 import numpy as np
-import matplotlib.pyplot as plt
 from stable_baselines3 import PPO
 from stable_baselines3.common.vec_env import DummyVecEnv
 from stable_baselines3.common.callbacks import BaseCallback
 from tqdm import tqdm
 
-from satellite_rl_env import SatelliteRLEnv
+from dynamics import SatelliteRLEnv
 
 # Custom callback to log training progress and store average rewards
 class ProgressCallback(BaseCallback):
-    def __init__(self, total_timesteps, print_freq=5000, verbose=1):
+    def __init__(self, total_timesteps, print_freq=5000, verbose=1, model_path='ppo_satellite_agent'):
         super(ProgressCallback, self).__init__(verbose)
         self.total_timesteps = total_timesteps
         self.print_freq = print_freq
         self.pbar = None
+        self.model_path = model_path
+        self.next_save = 10000
 
     def _on_training_start(self) -> None:
         # Initialize a progress bar with total timesteps
@@ -33,6 +33,13 @@ class ProgressCallback(BaseCallback):
         # Update progress bar by 1 step for each call to _on_step
         if self.pbar is not None:
             self.pbar.update(1)
+
+        # Save model at each order of magnitude of timesteps
+        if hasattr(self, 'num_timesteps') and self.num_timesteps >= self.next_save:
+            self.model.save(f"{self.model_path}_{self.next_save}")
+            print(f"Saved model at {self.next_save} timesteps to {self.model_path}_{self.next_save}")
+            self.next_save *= 10
+
         return True
 
     def _on_training_end(self) -> None:
@@ -49,7 +56,7 @@ def train_model(args):
     model = PPO("MlpPolicy", vec_env, verbose=0, learning_rate=args.learning_rate,
                 n_steps=args.n_steps, tensorboard_log="./ppo_tensorboard/")
     # Create a progress callback
-    progress_callback = ProgressCallback(total_timesteps=args.total_timesteps, print_freq=args.print_freq, verbose=0)
+    progress_callback = ProgressCallback(total_timesteps=args.total_timesteps, print_freq=args.print_freq, verbose=0, model_path=args.model_path)
     # Train the agent
     model.learn(total_timesteps=args.total_timesteps, callback=progress_callback)
     # Save the trained model
@@ -58,24 +65,9 @@ def train_model(args):
     # (Static plotting via the callback is disabled; see below in simulation mode.)
     return model
 
-def simulate_model(model, args):
-    # Create the RL environment for simulation with controlled_axes
-    env = SatelliteRLEnv(sim_time=args.sim_time, dt=args.dt, inertia=[1.0, 1.0, 1.0],
-                          I_w=args.I_w, max_torque=args.max_torque, controlled_axes=args.controlled_axes)
-    obs = env.reset()
-    done = False
-    while not done:
-        action, _ = model.predict(obs, deterministic=True)
-        obs, reward, done, info = env.step(action)
-        env.render()
-        # Optionally, print reward if desired
-        # print(f"Reward: {reward:.3f}")
-    env.close()
-
 def main():
     parser = argparse.ArgumentParser(description="Train or simulate an RL agent for Satellite Attitude Control using PPO")
     parser.add_argument('--train', action='store_true', help='Train a new model')
-    parser.add_argument('--load_model', action='store_true', help='Load a pretrained model and simulate')
     parser.add_argument('--model_path', type=str, default='ppo_satellite_agent', help='Path to save/load the model')
     parser.add_argument('--total_timesteps', type=int, default=100000, help='Total timesteps for training')
     parser.add_argument('--print_freq', type=int, default=5000, help='Frequency of printing training progress')
@@ -94,49 +86,9 @@ def main():
 
     if args.train:
         model = train_model(args)
-    elif args.load_model:
-        model = PPO.load(args.model_path)
-        print(f"Loaded model from {args.model_path}")
     else:
-        print("Please specify --train to train a new model or --load_model to simulate a pretrained model.")
+        print("Please specify --train to train a new model.")
         return
-
-    # Static plotting mode: collect simulation data and plot after simulation.
-    if args.plot_static:
-        from visualization import plot_static_simulation
-        # Create a new environment instance for static simulation
-        env = SatelliteRLEnv(sim_time=args.sim_time, dt=args.dt, inertia=[1.0, 10.0, 1.0],
-                              I_w=args.I_w, max_torque=args.max_torque, controlled_axes=args.controlled_axes)
-        times = []
-        euler_angles = []
-        omega_history = []
-        q_scalar_history = []
-        desired_q_scalar_history = []
-        obs = env.reset()
-        while env.current_time < env.sim_time:
-            times.append(env.current_time)
-            from scipy.spatial.transform import Rotation as R
-            euler = R.from_quat(env.q).as_euler('xyz', degrees=True)
-            q_scalar_history.append(env.q[3])
-            desired_q_scalar_history.append(1.0)  # Desired quaternion is [0,0,0,1] with scalar part 1.0
-            euler_angles.append(euler)
-            omega_history.append(env.omega.copy())
-            action, _ = model.predict(obs, deterministic=True)
-            obs, reward, done, info = env.step(action)
-        # Plot the static simulation results
-        plot_static_simulation(np.array(times), np.array(euler_angles), np.array(omega_history), q_scalar_history=np.array(q_scalar_history), desired_q_scalar_history=np.array(desired_q_scalar_history))
-        env.close()
-    else:
-        # Interactive simulation mode
-        env = SatelliteRLEnv(sim_time=args.sim_time, dt=args.dt, inertia=[1.0, 10.0, 1.0],
-                              I_w=args.I_w, max_torque=args.max_torque, controlled_axes=args.controlled_axes)
-        obs = env.reset()
-        done = False
-        while not done:
-            action, _ = model.predict(obs, deterministic=True)
-            obs, reward, done, info = env.step(action)
-            env.render()
-        env.close()
 
 if __name__ == '__main__':
     main()
