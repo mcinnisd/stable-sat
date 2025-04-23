@@ -9,7 +9,7 @@ plots a reward curve, and saves the model, or loads a pretrained model to simula
 import argparse
 import numpy as np
 from stable_baselines3 import PPO
-from stable_baselines3.common.vec_env import DummyVecEnv
+from stable_baselines3.common.vec_env import DummyVecEnv, VecCheckNan, VecNormalize
 from stable_baselines3.common.callbacks import BaseCallback
 from tqdm import tqdm
 
@@ -34,11 +34,15 @@ class ProgressCallback(BaseCallback):
         if self.pbar is not None:
             self.pbar.update(1)
 
-        # Save model at each order of magnitude of timesteps
+        # Save model at each order of magnitude up to 1e6, then every 1e6 steps
         if hasattr(self, 'num_timesteps') and self.num_timesteps >= self.next_save:
             self.model.save(f"{self.model_path}_{self.next_save}")
             print(f"Saved model at {self.next_save} timesteps to {self.model_path}_{self.next_save}")
-            self.next_save *= 10
+            # Increase next_save: multiply by 10 until 1e6, then add 1e6 each time
+            if self.next_save < 1000000:
+                self.next_save *= 10
+            else:
+                self.next_save += 1000000
 
         return True
 
@@ -48,13 +52,27 @@ class ProgressCallback(BaseCallback):
 
 def train_model(args):
     # Create the RL environment with controlled_axes
-    env = SatelliteRLEnv(sim_time=args.sim_time, dt=args.dt, inertia=[1.0, 1.0, 1.0],
+    env = SatelliteRLEnv(sim_time=args.sim_time, dt=args.dt, inertia=[0.108, 0.083, 0.042],
                           I_w=args.I_w, max_torque=args.max_torque, controlled_axes=args.controlled_axes)
     # Wrap the environment in a DummyVecEnv (required by SB3)
-    vec_env = DummyVecEnv([lambda: env])
+    # vec_env = VecCheckNan(DummyVecEnv([lambda: env]))
+    # Wrap the environment: catch NaNs/Infs and normalize observations
+
+    base_env = DummyVecEnv([lambda: env])
+    # Immediately error if any obs/reward/action contains NaN or Inf
+    vec_env = VecCheckNan(base_env)
+    # Normalize obs to zero‐mean/unit‐var and clip extremes to ±10
+    vec_env = VecNormalize(vec_env, norm_obs=True, clip_obs=10.0)
+
+    # vec_env = DummyVecEnv([lambda: env])
     # Create the PPO agent with provided hyperparameters
-    model = PPO("MlpPolicy", vec_env, verbose=0, learning_rate=args.learning_rate,
-                n_steps=args.n_steps, tensorboard_log="./ppo_tensorboard/")
+    model = PPO("MlpPolicy", vec_env, verbose=0,
+            learning_rate=args.learning_rate,
+            n_steps=args.n_steps,
+            clip_range=0.2,
+            max_grad_norm=0.5,
+            tensorboard_log="./ppo_tensorboard/")
+
     # Create a progress callback
     progress_callback = ProgressCallback(total_timesteps=args.total_timesteps, print_freq=args.print_freq, verbose=0, model_path=args.model_path)
     # Train the agent
@@ -71,14 +89,14 @@ def main():
     parser.add_argument('--model_path', type=str, default='ppo_satellite_agent', help='Path to save/load the model')
     parser.add_argument('--total_timesteps', type=int, default=100000, help='Total timesteps for training')
     parser.add_argument('--print_freq', type=int, default=5000, help='Frequency of printing training progress')
-    parser.add_argument('--learning_rate', type=float, default=1e-5, help='Learning rate for PPO')
-    parser.add_argument('--n_steps', type=int, default=4096, help='Number of steps per rollout')
+    parser.add_argument('--learning_rate', type=float, default=5e-4, help='Learning rate for PPO')
+    parser.add_argument('--n_steps', type=int, default=1024, help='Number of steps per rollout')
     parser.add_argument('--sim_time', type=float, default=50.0, help='Simulation time for environment')
-    parser.add_argument('--dt', type=float, default=0.1, help='Time step for environment')
-    parser.add_argument('--I_w', type=float, default=0.05, help='Reaction wheel inertia')
-    parser.add_argument('--max_torque', type=float, default=2.0, help='Maximum torque')
+    parser.add_argument('--dt', type=float, default=0.05, help='Time step for environment')
+    parser.add_argument('--I_w', type=float, default=0.1, help='Reaction wheel inertia')
+    parser.add_argument('--max_torque', type=float, default=0.007, help='Maximum torque')
     parser.add_argument('--plot_static', action='store_true', help='Use static plotting instead of interactive simulation')
-    parser.add_argument('--controlled_axes', type=str, default='0', help='Comma-separated list of axis indices to control (e.g., "0" for roll, "0,1" for roll and pitch, "0,1,2" for all axes)')
+    parser.add_argument('--controlled_axes', type=str, default='0,1,2', help='Comma-separated list of axis indices to control (e.g., "0" for roll, "0,1" for roll and pitch, "0,1,2" for all axes)')
     args = parser.parse_args()
 
     # Parse controlled_axes from string to list of ints

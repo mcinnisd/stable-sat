@@ -11,7 +11,7 @@ import numpy as np
 from scipy.spatial.transform import Rotation as R
 
 import visualization
-from visualization import plot_performance_vs_initial_error
+from visualization import plot_method_comparison
 from dynamics import SatelliteEnv, SatelliteRLEnv
 from controllers import PIDController, LQRController
 from stable_baselines3 import PPO
@@ -52,42 +52,54 @@ def run_interactive(env) -> None:
     plt.close('all')
     logging.info("Interactive simulation ended.")
 
-def run_static_simulation(env) -> None:
+def run_static_simulation(env, title_prefix=None) -> None:
     """
     Runs the simulation in static mode and plots the simulation results.
 
     Parameters:
         env: The satellite environment.
+        title_prefix: Optional string to prepend to plot titles.
     """
-    num_steps: int = int(env.sim_time / env.dt)
-    times = np.empty(num_steps)
-    euler_angles = np.empty((num_steps, 3))
-    omega_history = np.empty((num_steps, 3))
-    wheel_speeds = np.empty((num_steps, 3))
-    q_scalar_history = np.empty(num_steps)
-    desired_q_scalar_history = np.empty(num_steps)
-
-    step: int = 0
-    while env.current_time < env.sim_time and step < num_steps:
-        times[step] = env.current_time
-        euler = R.from_quat(env.q).as_euler('xyz', degrees=True)
-        euler_angles[step, :] = euler
-        q_scalar_history[step] = env.q[3]
-        if (hasattr(env, 'control_policy') and env.control_policy is not None and 
-            hasattr(env.control_policy, 'desired_points')):
-            desired_q_scalar_history[step] = env.control_policy.desired_points[env.control_policy.current_target_idx][3]
-        else:
-            desired_q_scalar_history[step] = np.nan
-        omega_history[step, :] = env.omega.copy()
-        wheel_speeds[step, :] = env.omega_w.copy()
-        env.step()
-        step += 1
-
-    visualization.plot_static_simulation(times, euler_angles, omega_history,
-                                         q_scalar_history=q_scalar_history,
-                                         desired_q_scalar_history=desired_q_scalar_history)
+    times, euler_angles, omega_history, wheel_speeds, q_scalar_history, desired_q_scalar_history = collect_time_series(env)
+    # Compute attitude error from quaternion scalar
+    import numpy as _np
+    error_history = _np.degrees(2 * _np.arccos(_np.clip(q_scalar_history, -1.0, 1.0)))
+    visualization.plot_static_simulation(
+        times, euler_angles, omega_history,
+        error_history=error_history,
+        desired_euler_points=None,
+        title_prefix=title_prefix
+    )
     visualization.plot_wheel_speeds(times, wheel_speeds)
     logging.info("Static simulation plots generated.")
+
+
+def collect_time_series(env, model=None, desired_scalar=1.0):
+    """
+    Record state history from the environment.
+
+    If *model* is supplied, the agent’s actions are used; otherwise the
+    environment relies on its internal control policy.
+    Returns six numpy arrays: times, euler_angles, omega_history,
+    wheel_speeds, q_scalar_history, desired_q_scalar_history.
+    """
+    times, eulers, omegas, wheels, q_scalars, q_des_scalars = [], [], [], [], [], []
+    obs = env._get_obs() if model else None
+    done = False
+    while env.current_time < env.sim_time and not done:
+        times.append(env.current_time)
+        eulers.append(R.from_quat(env.q).as_euler('xyz', degrees=True))
+        omegas.append(env.omega.copy())
+        wheels.append(env.omega_w.copy())
+        q_scalars.append(env.q[3])
+        q_des_scalars.append(desired_scalar)
+        if model:
+            action, _ = model.predict(obs, deterministic=True)
+            obs, _, done, _ = env.step(action)
+        else:
+            obs, _, done, _ = env.step()
+    return (np.array(times), np.array(eulers), np.array(omegas),
+            np.array(wheels), np.array(q_scalars), np.array(q_des_scalars))
 
 def main() -> None:
     """
@@ -96,15 +108,15 @@ def main() -> None:
     logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
     parser = argparse.ArgumentParser(description="Unified Satellite Attitude Simulation")
     parser.add_argument('--sim_time', type=float, default=50.0, help="Total simulation time (s)")
-    parser.add_argument('--dt', type=float, default=0.1, help="Time step (s)")
-    parser.add_argument('--inertia', type=float, nargs=3, default=[1.0, 1.0, 1.0], help="Satellite inertia (Ix Iy Iz)")
-    parser.add_argument('--I_w', type=float, default=0.05, help="Reaction wheel inertia")
+    parser.add_argument('--dt', type=float, default=0.05, help="Time step (s)")
+    parser.add_argument('--inertia', type=float, nargs=3, default=[0.108, 0.083, 0.042], help="Satellite inertia (Ix Iy Iz)")
+    parser.add_argument('--I_w', type=float, default=0.1, help="Reaction wheel inertia")
     parser.add_argument('--initial_euler', type=float, nargs=3, default=[20, 0, 0], help="Initial Euler angles (deg)")
     parser.add_argument('--control_mode', type=str, default='PID', choices=['PID', 'LQR', 'RL', 'None'], help="Control mode: PID, LQR, RL, or None")
-    parser.add_argument('--model_path', type=str, default='ppo_satellite_agent', help="Path to RL model (for RL mode)")
+    parser.add_argument('--model_path', type=str, default='best', help="Path to RL model (for RL mode)")
     parser.add_argument('--controlled_axes', type=str, default='0,1,2',
                         help="Comma-separated list of axis indices for RL control (e.g., '0,1,2')")
-    parser.add_argument('--max_torque', type=float, default=2.0,
+    parser.add_argument('--max_torque', type=float, default=0.007,
                         help="Maximum torque for RL environment")
     parser.add_argument('--interactive', action='store_true', help="Run interactive simulation")
     parser.add_argument('--save_animation', action='store_true', help="Save animation as GIF")
@@ -112,7 +124,7 @@ def main() -> None:
     parser.add_argument('--plot_static', action='store_true', help="Plot static simulation results")
     parser.add_argument('--evaluate', action='store_true',
                         help="Evaluate all controllers over multiple random trials")
-    parser.add_argument('--num_trials', type=int, default=30,
+    parser.add_argument('--num_trials', type=int, default=100,
                         help="Number of trials for evaluation")
     parser.add_argument('--eval_rl', action='store_true',
                         help="Evaluate RL models at different training steps using a model prefix")
@@ -259,6 +271,45 @@ def main() -> None:
             torques = np.array(results[mode]['torques'])
             print(f"{mode}: time {times.mean():.2f} ± {times.std():.2f}s, "
                   f"torque {torques.mean():.2f} ± {torques.std():.2f}")
+
+        # --- Scatter plots of convergence time vs initial error ---
+        import visualization as _viz
+        for mode in controllers:
+            _viz.plot_performance_vs_initial_error(
+                results[mode]['init_errors'],
+                results[mode]['times'],
+                results[mode]['torques'],
+                label=mode
+            )
+
+        # After printing summary, plot method comparisons
+        methods = controllers
+        time_means, time_lows, time_highs = [], [], []
+        torque_means, torque_lows, torque_highs = [], [], []
+        for mode in controllers:
+            t = np.array(results[mode]['times'])
+            tau = np.array(results[mode]['torques'])
+            time_means.append(t.mean())
+            time_lows.append(t.min())
+            # cap the maximum time bound at 49.9 seconds
+            time_highs.append(min(t.mean() + t.std(), 49.9))
+            torque_means.append(tau.mean())
+            torque_lows.append(tau.min())
+            torque_highs.append(tau.max())
+        # Plot convergence time comparison
+        plot_method_comparison(
+            methods,
+            time_means, time_lows, time_highs,
+            ylabel='Convergence Time (s)',
+            title='Method Convergence Times'
+        )
+        # Plot torque usage comparison
+        plot_method_comparison(
+            methods,
+            torque_means, torque_lows, torque_highs,
+            ylabel='Total Torque',
+            title='Method Torque Usage'
+        )
         return
 
     
@@ -266,13 +317,21 @@ def main() -> None:
     initial_q = R.from_euler('xyz', np.radians(args.initial_euler)).as_quat()
 
     if args.control_mode == 'PID':
-        control_policy = PIDController()
+        control_policy = PIDController(max_torque=args.max_torque)
         env = SatelliteEnv(sim_time=args.sim_time, dt=args.dt, inertia=args.inertia, I_w=args.I_w, control_policy=control_policy)
         env.reset(initial_q=initial_q)
+        # When plotting static PID simulation, target only the zero orientation
+        if args.plot_static or args.interactive:
+            control_policy.desired_points = [np.array([0.0, 0.0, 0.0, 1.0])]
+            control_policy.current_target_idx = 0
     elif args.control_mode == 'LQR':
-        control_policy = LQRController()
+        control_policy = LQRController(max_torque=args.max_torque)
         env = SatelliteEnv(sim_time=args.sim_time, dt=args.dt, inertia=args.inertia, I_w=args.I_w, control_policy=control_policy)
         env.reset(initial_q=initial_q)
+        # When plotting static LQR simulation, target only the zero orientation
+        if args.plot_static or args.interactive:
+            control_policy.desired_points = [np.array([0.0, 0.0, 0.0, 1.0])]
+            control_policy.current_target_idx = 0
         
     elif args.control_mode == 'RL':
         env = SatelliteRLEnv(sim_time=args.sim_time, dt=args.dt, inertia=args.inertia,
@@ -299,70 +358,34 @@ def main() -> None:
             run_interactive(env)
     elif args.plot_static:
         if args.control_mode == 'RL':
-            # Manual static simulation for RL controller
-            num_steps = int(env.sim_time / env.dt)
-            times = []
-            euler_angles = []
-            omega_history = []
-            wheel_speeds = []
-            q_scalar_history = []
-            desired_q_scalar_history = []
-            obs_local = obs
-            done = False
-            step = 0
-            while env.current_time < env.sim_time and not done and step < num_steps:
-                times.append(env.current_time)
-                euler_angles.append(R.from_quat(env.q).as_euler('xyz', degrees=True))
-                omega_history.append(env.omega.copy())
-                wheel_speeds.append(env.omega_w.copy())
-                q_scalar_history.append(env.q[3])
-                desired_q_scalar_history.append(1.0)  # target quaternion scalar
-                action, _ = model.predict(obs_local, deterministic=True)
-                obs_local, _, done, _ = env.step(action)
-                step += 1
+            times, euler_angles, omega_history, wheel_speeds, q_scalar_history, desired_q_scalar_history = \
+                collect_time_series(env, model)
+            import numpy as _np
+            error_history = _np.degrees(2 * _np.arccos(_np.clip(q_scalar_history, -1.0, 1.0)))
             visualization.plot_static_simulation(
-                np.array(times),
-                np.array(euler_angles),
-                np.array(omega_history),
-                q_scalar_history=np.array(q_scalar_history),
-                desired_q_scalar_history=np.array(desired_q_scalar_history)
+                times, euler_angles, omega_history,
+                error_history=error_history,
+                desired_euler_points=None,
+                title_prefix=args.model_path
             )
             visualization.plot_wheel_speeds(times, wheel_speeds)
         else:
-            run_static_simulation(env)
+            run_static_simulation(env, title_prefix=args.control_mode)
     else:
         if args.control_mode == 'RL':
-            # Default static simulation for RL controller
-            num_steps = int(env.sim_time / env.dt)
-            times = []
-            euler_angles = []
-            omega_history = []
-            wheel_speeds = []
-            q_scalar_history = []
-            desired_q_scalar_history = []
-            obs_local = obs
-            done = False
-            step = 0
-            while env.current_time < env.sim_time and not done and step < num_steps:
-                times.append(env.current_time)
-                euler_angles.append(R.from_quat(env.q).as_euler('xyz', degrees=True))
-                omega_history.append(env.omega.copy())
-                wheel_speeds.append(env.omega_w.copy())
-                q_scalar_history.append(env.q[3])
-                desired_q_scalar_history.append(1.0)
-                action, _ = model.predict(obs_local, deterministic=True)
-                obs_local, _, done, _ = env.step(action)
-                step += 1
+            times, euler_angles, omega_history, wheel_speeds, q_scalar_history, desired_q_scalar_history = \
+                collect_time_series(env, model)
+            import numpy as _np
+            error_history = _np.degrees(2 * _np.arccos(_np.clip(q_scalar_history, -1.0, 1.0)))
             visualization.plot_static_simulation(
-                np.array(times),
-                np.array(euler_angles),
-                np.array(omega_history),
-                q_scalar_history=np.array(q_scalar_history),
-                desired_q_scalar_history=np.array(desired_q_scalar_history)
+                times, euler_angles, omega_history,
+                error_history=error_history,
+                desired_euler_points=None,
+                title_prefix=args.model_path
             )
             visualization.plot_wheel_speeds(times, wheel_speeds)
         else:
-            run_static_simulation(env)
+            run_static_simulation(env, title_prefix=args.control_mode)
 
 if __name__ == '__main__':
     main()

@@ -17,48 +17,34 @@ import visualization
 import logging
 import warnings
 warnings.filterwarnings("ignore", message="Gimbal lock detected")
+logger = logging.getLogger(__name__)
 
-# Set up logging for dynamics module
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+def update_state(q, omega, dt, torque, I_sat, I_inv=None):
 
+    I_inv = np.linalg.inv(I_sat) if I_inv is None else I_inv
 
-def update_state(q: np.ndarray, omega: np.ndarray, dt: float, torque: np.ndarray, I_sat: np.ndarray, I_inv: np.ndarray = None) -> tuple[np.ndarray, np.ndarray]:
-    """
-    Updates the satellite state given the current state, time step, applied torque, and inertia matrix.
-    
-    Parameters:
-      q (np.ndarray): Current quaternion [x, y, z, w].
-      omega (np.ndarray): Current angular velocity (rad/s).
-      dt (float): Time step.
-      torque (np.ndarray): Applied external torque.
-      I_sat (np.ndarray): Satellite inertia matrix.
-      I_inv (np.ndarray, optional): Precomputed inverse of I_sat. If not provided, it will be computed.
-    
-    Returns:
-      q_new (np.ndarray): Updated (and normalized) quaternion.
-      omega_new (np.ndarray): Updated angular velocity.
-    """
-    if I_inv is None:
-        I_inv = np.linalg.inv(I_sat)
-    
-    # Calculate angular acceleration: ω̇ = I⁻¹ (τ - ω × (I * ω))
     omega_dot = I_inv @ (torque - np.cross(omega, I_sat @ omega))
-    
-    # Update angular velocity using Euler integration
     omega_new = omega + omega_dot * dt
-    
-    # Update quaternion: use the new angular velocity to compute the rotation vector
-    delta_rot = R.from_rotvec(omega_new * dt)
-    q_new = (R.from_quat(q) * delta_rot).as_quat()
-    
-    # Normalize the updated quaternion to ensure unit length
-    q_new = normalize_quaternion(q_new)
-    
+
+    # q_new = (R.from_quat(q) * R.from_rotvec(omega_new * dt)).as_quat()
+
+    delta = R.from_rotvec(omega_new * dt)
+    q_new  = (delta * R.from_quat(q)).as_quat()
+
+    q_new /= np.linalg.norm(q_new)
+
+    if q_new[3] < 0:          # keep scalar ≥ 0 for continuity
+        q_new = -q_new
+
+    # guard against non-finite state updates
+    if not np.all(np.isfinite(omega_new)):
+        raise ValueError(f"Non-finite omega_new: {omega_new}")
+    if not np.all(np.isfinite(q_new)):
+        raise ValueError(f"Non-finite quaternion: {q_new}")
+
     return q_new, omega_new
 
-
 def compute_lqr_gain(I_i: float, Q: np.ndarray, R_mat: np.ndarray) -> np.ndarray:
-    """Compute LQR gain for a double integrator model for a given axis."""
     A = np.array([[0, 1],
                   [0, 0]])
     B = np.array([[0],
@@ -67,15 +53,32 @@ def compute_lqr_gain(I_i: float, Q: np.ndarray, R_mat: np.ndarray) -> np.ndarray
     K = np.linalg.inv(R_mat) @ (B.T @ P)
     return K
 
+def quaternion_error(q_current: np.ndarray, q_desired: np.ndarray) -> np.ndarray:
+    """
+    Compute the body-frame quaternion error vector (axis*2) between
+    current and desired orientations.
+    """
+    # Convert to Rotation objects
+    qc     = R.from_quat(q_current)
+    qd_inv = R.from_quat(q_desired).inv()
+    # q_err = qd_inv ⊗ qc
+    qe     = (qd_inv * qc).as_quat()
+    # Force scalar ≥ 0 for shortest path
+    if qe[3] < 0:
+        qe = -qe
+    # Small-angle axis error = 2 * vector part
+    return qe[:3] * 2
+
 
 def normalize_quaternion(q: np.ndarray) -> np.ndarray:
-    """Normalizes a quaternion and logs a warning if the norm is zero."""
     norm = np.linalg.norm(q)
     if norm == 0:
-        logging.warning("Attempted to normalize a zero-norm quaternion. Returning the original quaternion.")
         return q
     return q / norm
 
+def ensure_unit_positive(q):
+        q = q/np.linalg.norm(q)
+        return -q if q[3] < 0 else q
 
 class SatelliteEnv(gym.Env):
     """
@@ -103,8 +106,11 @@ class SatelliteEnv(gym.Env):
         # Default control policy: no torque.
         return np.zeros(3)
     
+
     def reset(self, initial_q=None, initial_omega=None):
-        self.q = np.array([0, 0, 0, 1]) if initial_q is None else normalize_quaternion(initial_q)
+
+        self.q = ensure_unit_positive(initial_q if initial_q is not None else np.array([0,0,0,1])) 
+        # self.q = np.array([0, 0, 0, 1]) if initial_q is None else normalize_quaternion(initial_q)
         self.omega = np.zeros(3) if initial_omega is None else initial_omega
         self.current_time = 0.0
         self.omega_w = np.zeros(3)
@@ -158,8 +164,8 @@ class SatelliteRLEnv(SatelliteEnv):
     State is [roll, pitch, yaw, ω_x, ω_y, ω_z], reward penalizes deviation from [0,0,0,1],
     and episode ends when error is below threshold for hold_time_threshold.
     """
-    def __init__(self, sim_time=100.0, dt=0.1, inertia=[1.0, 1.0, 1.0],
-                 I_w=0.05, max_torque=.2, controlled_axes=[0, 1, 2],
+    def __init__(self, sim_time=100.0, dt=0.1, inertia=[0.108, 0.083, 0.042],
+                 I_w=0.1, max_torque=.1, controlled_axes=[0, 1, 2],
                  hold_time_threshold=1.0):
         # Flag to indicate we're in initialization, so reset uses parent logic
         self._during_init = True
@@ -220,8 +226,15 @@ class SatelliteRLEnv(SatelliteEnv):
         for i, ax in enumerate(self.controlled_axes):
             full_action[ax] = action[i]
         full_action = np.clip(full_action, -self.max_torque, self.max_torque)
+        # clamp any NaNs/Infs in the action
+        full_action = np.nan_to_num(full_action, nan=0.0, posinf=self.max_torque, neginf=-self.max_torque)
         # Update dynamics
         self.q, self.omega = update_state(self.q, self.omega, self.dt, -full_action, self.I_sat)
+        # verify no NaNs/Infs in state
+        if not np.all(np.isfinite(self.q)):
+            raise ValueError(f"Non-finite quaternion after update: {self.q}")
+        if not np.all(np.isfinite(self.omega)):
+            raise ValueError(f"Non-finite omega after update: {self.omega}")
         self.current_time += self.dt
         self.omega_w += (full_action / self.I_w) * self.dt
         obs = self._get_obs()
@@ -243,6 +256,10 @@ class SatelliteRLEnv(SatelliteEnv):
         if self.current_time >= self.sim_time:
             done = True
         info = {'torque': full_action.copy()}
+        # sanitize observations
+        obs = np.nan_to_num(obs, nan=0.0, posinf=1e6, neginf=-1e6)
+        if not np.all(np.isfinite(obs)):
+            raise ValueError(f"Non-finite observation: {obs}")
         return obs, reward, done, info
 
     def render(self, mode='human'):

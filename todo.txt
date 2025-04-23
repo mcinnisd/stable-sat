@@ -1,1 +1,0 @@
-tune pid controller gains, mess around with LQR gains too
